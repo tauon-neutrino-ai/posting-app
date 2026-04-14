@@ -28,21 +28,25 @@ io.on('connection', (socket) => {
 
   // Register or update user
   socket.on('client:register', (data) => {
-    const { id, name, color } = data;
+    const { id, name, color, path, currentLocation, isPaused } = data;
     if (!users[id]) {
       users[id] = {
         id,
         name,
         color,
-        path: [],
-        currentLocation: null,
-        isPaused: false,
+        path: path || [],
+        currentLocation: currentLocation || null,
+        isPaused: isPaused || false,
         lastUpdated: Date.now()
       };
     } else {
-      // Just update name and color if they re-register
+      // Rehydrate path/location if provided (happens on reconnect)
       users[id].name = name;
       users[id].color = color;
+      if (path && path.length > 0) users[id].path = path;
+      if (currentLocation) users[id].currentLocation = currentLocation;
+      if (isPaused !== undefined) users[id].isPaused = isPaused;
+      users[id].lastUpdated = Date.now();
     }
     
     io.emit('server:state', users);
@@ -52,17 +56,12 @@ io.on('connection', (socket) => {
   socket.on('client:updateLocation', (data) => {
     const { id, location } = data;
     if (users[id]) {
-        // Only add to path and update current location if not paused
         if (!users[id].isPaused) {
             users[id].currentLocation = location;
-            // append to path
             users[id].path.push(location);
             users[id].lastUpdated = Date.now();
-            io.emit('server:state', users);
-        } else {
-            // Still update their current location so we know where they stopped, but don't append to path?
-            // Actually, if paused, we stop receiving location tracking entirely from client side.
-            // But if we do receive it, maybe just ignore or only update currentLocation.
+            // Emit DELTA instead of full state to save massive bandwidth
+            io.emit('server:updateLocation', { id, location });
         }
     }
   });
@@ -73,7 +72,8 @@ io.on('connection', (socket) => {
     if (users[id]) {
         users[id].isPaused = isPaused;
         users[id].lastUpdated = Date.now();
-        io.emit('server:state', users);
+        // Emit DELTA instead of full state
+        io.emit('server:setPaused', { id, isPaused });
     }
   });
 

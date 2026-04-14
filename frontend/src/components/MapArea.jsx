@@ -1,9 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { MapContainer, TileLayer, Polyline, Marker } from 'react-leaflet';
 import L from 'leaflet';
-import { Play, Pause, Navigation } from 'lucide-react';
-
-const HON_ATSUGI_COORDS = [35.4394, 139.3639];
+import { Play, Pause, Navigation, Sun } from 'lucide-react';
 
 const createCustomIcon = (name, color) => {
   return L.divIcon({
@@ -21,18 +19,82 @@ const createCustomIcon = (name, color) => {
 
 function MapArea({ user, usersState, socket }) {
   const [isPaused, setIsPaused] = useState(false);
+  const [isWakeLockEnabled, setIsWakeLockEnabled] = useState(true);
+  const [initialCenter, setInitialCenter] = useState(null);
+  
   const watchIdRef = useRef(null);
+  const lastLocRef = useRef(null);
+  const wakeLockRef = useRef(null);
+
+  // Handle Wake Lock
+  useEffect(() => {
+    const requestWakeLock = async () => {
+      if ('wakeLock' in navigator && isWakeLockEnabled) {
+        try {
+          if (wakeLockRef.current) return;
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+        } catch (err) {
+          console.error("Wake Lock error:", err);
+        }
+      } else if (wakeLockRef.current) {
+        wakeLockRef.current.release().then(() => {
+          wakeLockRef.current = null;
+        });
+      }
+    };
+    
+    requestWakeLock();
+    
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && isWakeLockEnabled) {
+        requestWakeLock();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (wakeLockRef.current) {
+         wakeLockRef.current.release().catch(() => {});
+         wakeLockRef.current = null;
+      }
+    };
+  }, [isWakeLockEnabled]);
 
   useEffect(() => {
     // Start watching position
     if ('geolocation' in navigator) {
+      // Get initial location for centering
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+           setInitialCenter([position.coords.latitude, position.coords.longitude]);
+        },
+        (err) => {
+           console.warn("Could not get initial location, defaulting to Hon-Atsugi");
+           setInitialCenter([35.4394, 139.3639]);
+        },
+        { enableHighAccuracy: true, timeout: 5000 }
+      );
+
       watchIdRef.current = navigator.geolocation.watchPosition(
         (position) => {
           const { latitude, longitude } = position.coords;
           const location = [latitude, longitude];
           
           if (!isPaused) {
-            socket.emit('client:updateLocation', { id: user.id, location });
+            // 10-meter distance filtering
+            let shouldSend = true;
+            if (lastLocRef.current) {
+               const dist = L.latLng(lastLocRef.current).distanceTo(L.latLng(location));
+               if (dist < 10) {
+                  shouldSend = false;
+               }
+            }
+            
+            if (shouldSend) {
+               socket.emit('client:updateLocation', { id: user.id, location });
+               lastLocRef.current = location;
+            }
           }
         },
         (error) => {
@@ -42,6 +104,7 @@ function MapArea({ user, usersState, socket }) {
       );
     } else {
       console.warn("Geolocation not supported");
+      setInitialCenter([35.4394, 139.3639]);
     }
 
     return () => {
@@ -56,6 +119,14 @@ function MapArea({ user, usersState, socket }) {
     setIsPaused(newPausedState);
     socket.emit('client:setPaused', { id: user.id, isPaused: newPausedState });
   };
+
+  if (!initialCenter) {
+     return (
+       <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center' }}>
+         <div className="glass-panel">現在地を取得しています...</div>
+       </div>
+     );
+  }
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
@@ -72,7 +143,7 @@ function MapArea({ user, usersState, socket }) {
       </div>
 
       <MapContainer 
-        center={HON_ATSUGI_COORDS} 
+        center={initialCenter} 
         zoom={15} 
         style={{ width: '100%', height: '100%', zIndex: 1 }}
         zoomControl={false}
@@ -80,7 +151,6 @@ function MapArea({ user, usersState, socket }) {
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" 
-          // Using Carto Voyager tiles for a clean, light-mode modern look that makes colored paths pop out
         />
         
         {/* Draw paths and markers for all active users */}
@@ -116,7 +186,16 @@ function MapArea({ user, usersState, socket }) {
       </MapContainer>
 
       {/* Floating Action Buttons */}
-      <div className="action-controls">
+      <div className="action-controls" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        <button 
+          className={`btn-pause ${!isWakeLockEnabled ? 'is-paused' : ''}`} 
+          onClick={() => setIsWakeLockEnabled(!isWakeLockEnabled)}
+          style={{ padding: '12px 20px', fontSize: '0.9rem' }}
+        >
+          <Sun size={20} />
+          {isWakeLockEnabled ? 'スリープ防止 動作中' : 'スリープ防止 停止中'}
+        </button>
+
         <button 
           className={`btn-pause ${isPaused ? 'is-paused' : ''}`} 
           onClick={togglePause}

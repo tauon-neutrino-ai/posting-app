@@ -32,10 +32,60 @@ function App() {
       setUsersState(state);
     });
 
+    socket.on('server:updateLocation', ({ id, location }) => {
+      setUsersState(prev => {
+        const newState = { ...prev };
+        if (newState[id]) {
+            const userState = { ...newState[id] };
+            userState.currentLocation = location;
+            userState.path = [...(userState.path || []), location];
+            userState.lastUpdated = Date.now();
+            newState[id] = userState;
+        }
+        return newState;
+      });
+    });
+
+    socket.on('server:setPaused', ({ id, isPaused }) => {
+      setUsersState(prev => {
+        const newState = { ...prev };
+        if (newState[id]) {
+            const userState = { ...newState[id] };
+            userState.isPaused = isPaused;
+            userState.lastUpdated = Date.now();
+            newState[id] = userState;
+        }
+        return newState;
+      });
+    });
+
     return () => {
       socket.off('server:state');
+      socket.off('server:updateLocation');
+      socket.off('server:setPaused');
     };
   }, []);
+
+  // Re-register immediately upon socket reconnection
+  useEffect(() => {
+    if (!user) return;
+    const onConnect = () => {
+      const savedPath = JSON.parse(localStorage.getItem('posting-app-path') || '[]');
+      const savedLoc = JSON.parse(localStorage.getItem('posting-app-loc') || 'null');
+      socket.emit('client:register', { ...user, path: savedPath, currentLocation: savedLoc });
+    };
+    socket.on('connect', onConnect);
+    return () => socket.off('connect', onConnect);
+  }, [user]);
+
+  // Backup state to localStorage to prevent data loss
+  useEffect(() => {
+    if (user && usersState[user.id]) {
+       const myState = usersState[user.id];
+       if (myState.path) localStorage.setItem('posting-app-path', JSON.stringify(myState.path));
+       if (myState.currentLocation) localStorage.setItem('posting-app-loc', JSON.stringify(myState.currentLocation));
+    }
+  }, [user, usersState]);
 
   const handleRegister = (name) => {
     let id = localStorage.getItem('posting-app-userid');
@@ -52,8 +102,11 @@ function App() {
     
     localStorage.setItem('posting-app-username', name);
 
-    const newUserInfo = { id, name, color };
-    setUser(newUserInfo);
+    const savedPath = JSON.parse(localStorage.getItem('posting-app-path') || '[]');
+    const savedLoc = JSON.parse(localStorage.getItem('posting-app-loc') || 'null');
+
+    const newUserInfo = { id, name, color, path: savedPath, currentLocation: savedLoc };
+    setUser({ id, name, color });
     
     // Tell server about us
     socket.emit('client:register', newUserInfo);
