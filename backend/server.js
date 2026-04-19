@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
+const admin = require('firebase-admin');
 
 const app = express();
 app.use(cors());
@@ -19,6 +20,51 @@ const io = new Server(server, {
 // In-memory state
 // format: { [userId]: { id, name, color, path: [[lat, lng], ...], currentLocation: [lat, lng], isPaused: false, lastUpdated: Date.now() } }
 let users = {};
+
+let db = null;
+if (process.env.FIREBASE_CREDENTIALS && process.env.FIREBASE_DB_URL) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: process.env.FIREBASE_DB_URL
+    });
+    db = admin.database();
+    console.log('Firebase Admin initialized successfully.');
+    
+    // Load state on startup
+    db.ref('users').once('value', (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        users = data;
+        console.log('State restored from Firebase');
+      }
+    });
+  } catch (err) {
+    console.error('Error initializing Firebase:', err);
+  }
+} else {
+  console.log('Warning: FIREBASE_CREDENTIALS or FIREBASE_DB_URL missing. Running in memory mode only.');
+}
+
+let hasChanges = false;
+function markChanges() {
+  hasChanges = true;
+}
+
+// Back up to Firebase every 30 seconds
+setInterval(() => {
+  if (hasChanges && db) {
+    db.ref('users').set(users, (error) => {
+      if (error) {
+        console.error('Firebase save failed:', error);
+      } else {
+        hasChanges = false;
+        console.log('State synced to Firebase');
+      }
+    });
+  }
+}, 30000);
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
@@ -49,6 +95,7 @@ io.on('connection', (socket) => {
       users[id].lastUpdated = Date.now();
     }
     
+    markChanges();
     io.emit('server:state', users);
   });
 
@@ -60,6 +107,7 @@ io.on('connection', (socket) => {
             users[id].currentLocation = location;
             users[id].path.push(location);
             users[id].lastUpdated = Date.now();
+            markChanges();
             // Emit DELTA instead of full state to save massive bandwidth
             io.emit('server:updateLocation', { id, location });
         }
@@ -72,6 +120,7 @@ io.on('connection', (socket) => {
     if (users[id]) {
         users[id].isPaused = isPaused;
         users[id].lastUpdated = Date.now();
+        markChanges();
         // Emit DELTA instead of full state
         io.emit('server:setPaused', { id, isPaused });
     }
@@ -93,6 +142,13 @@ app.get(/.*/, (req, res) => {
 cron.schedule('0 1 * * *', () => {
   console.log('Running AM 1:00 cron job - resetting state...');
   users = {};
+  if (db) {
+    db.ref('users').set({}, (error) => {
+      if (error) console.error('Firebase clear failed:', error);
+      else console.log('Firebase cleared successfully.');
+    });
+  }
+  hasChanges = false;
   io.emit('server:state', users);
 });
 
